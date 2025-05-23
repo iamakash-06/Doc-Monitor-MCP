@@ -1,10 +1,10 @@
-# doc-monitor
+<h1 align="center">Doc Monitor MCP</h1>
 
 **Advanced Documentation Monitoring & RAG Server for AI Agents**
 
 ---
 
-`doc-monitor` (originally `doc-fetcher`) is an intelligent Model Context Protocol (MCP) server that continuously monitors documentation, detects changes, and provides advanced Retrieval Augmented Generation (RAG) capabilities for AI agents and coding assistants. It automatically crawls web documentation, tracks versions, analyzes change impact, and maintains a searchable knowledge base to help developers stay current with evolving APIs and documentation.
+`doc-monitor` is an intelligent Model Context Protocol (MCP) server that continuously monitors documentation, detects changes, and provides advanced Retrieval Augmented Generation (RAG) capabilities for AI agents and coding assistants. It automatically crawls web documentation, tracks versions, analyzes change impact, and maintains a searchable knowledge base to help developers stay current with evolving APIs and documentation.
 
 ## 🚀 Key Features
 
@@ -253,19 +253,10 @@ MEMORY_THRESHOLD_PERCENT = 70.0  # Memory usage limit
 Enable enhanced retrieval with contextual embeddings by setting `MODEL_CHOICE`:
 
 ```env
-MODEL_CHOICE=gpt-4o-mini  # Enables context-aware chunk processing
+MODEL_CHOICE= text-embedding-3-large # Enables context-aware chunk processing
 ```
 
-This generates better embeddings by providing document context, improving search relevance.
 
-## 🤝 Contributing
-
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for:
-
-- 🐛 **Bug Reports**: Issue templates and debugging info
-- 🚀 **Feature Requests**: Enhancement proposals and use cases  
-- 🔧 **Development**: Local setup, testing, and code standards
-- 📚 **Documentation**: Improvements and examples
 
 ## 📄 License
 
