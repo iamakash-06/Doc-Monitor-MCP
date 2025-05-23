@@ -36,7 +36,7 @@
 ### Docker (Recommended)
 
 ```bash
-git clone https://github.com/your-username/doc-monitor.git
+git clone https://github.com/iamakash-06/doc-monitor.git
 cd doc-monitor
 docker build -t doc-monitor .
 ```
@@ -44,7 +44,7 @@ docker build -t doc-monitor .
 ### Local Development
 
 ```bash
-git clone https://github.com/your-username/doc-monitor.git
+git clone https://github.com/iamakash-06/doc-monitor.git
 cd doc-monitor
 pip install uv
 uv venv

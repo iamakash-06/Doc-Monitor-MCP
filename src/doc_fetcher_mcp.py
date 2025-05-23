@@ -1,5 +1,5 @@
 """
-DocFetcher MCP server for web crawling and RAG.
+DocMonitor MCP server for web crawling and RAG.
 
 This server provides tools to crawl websites using Crawl4AI, automatically detecting
 the appropriate crawl method based on URL type (sitemap, txt file, or regular webpage).
@@ -47,14 +47,14 @@ load_dotenv(dotenv_path, override=True)
 # =========================
 @dataclass
 class DocFetcherContext:
-    """Context for the DocFetcher MCP server."""
+    """Context for the DocMonitor MCP server."""
     crawler: AsyncWebCrawler
     supabase_client: Client
 
 @asynccontextmanager
 async def docfetcher_lifespan(server: FastMCP) -> AsyncIterator[DocFetcherContext]:
     """
-    Manages the DocFetcher client lifecycle.
+    Manages the DocMonitor client lifecycle.
     """
     browser_config = BrowserConfig(headless=True, verbose=False)
     crawler = AsyncWebCrawler(config=browser_config)
@@ -69,8 +69,8 @@ async def docfetcher_lifespan(server: FastMCP) -> AsyncIterator[DocFetcherContex
 # FastMCP Server Init
 # =========================
 mcp = FastMCP(
-    "doc-fetcher",
-    description="MCP server for RAG and web crawling with DocFetcher",
+    "doc-monitor",
+    description="MCP server for RAG and web crawling with DocMonitor",
     lifespan=docfetcher_lifespan,
     host=os.getenv("HOST", "0.0.0.0"),
     port=os.getenv("PORT", "8051")
