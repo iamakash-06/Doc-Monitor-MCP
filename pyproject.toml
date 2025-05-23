@@ -1,0 +1,13 @@
+[project]
+name = "doc-fetcher"
+version = "0.1.0"
+description = "MCP server for integrating web crawling and RAG into AI agents and AI coding assistants (DocFetcher)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "crawl4ai==0.6.2",
+    "mcp==1.7.1",
+    "supabase==2.15.1",
+    "openai==1.71.0",
+    "dotenv==0.9.9"
+]
