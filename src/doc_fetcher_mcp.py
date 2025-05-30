@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
-from urllib.parse import urlparse, urldefrag
+from urllib.parse import urlparse, urldefrag, urljoin
 from xml.etree import ElementTree
 from dotenv import load_dotenv
 from supabase import Client
@@ -20,6 +20,7 @@ import json
 import os
 import re
 from datetime import datetime
+import html2text
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
 from utils import (
@@ -111,34 +112,121 @@ async def crawl_batch(crawler: AsyncWebCrawler, urls: list[str], max_concurrent:
         print(f"[ERROR] Exception in crawl_batch: {e}")
         return []
 
-async def crawl_recursive_internal_links(
-    crawler: AsyncWebCrawler, start_urls: list[str], max_depth: int = MAX_DEPTH, max_concurrent: int = MAX_CONCURRENT
+async def crawl_website_recursively(
+    crawler: AsyncWebCrawler,
+    start_url: str,
+    max_depth: int = MAX_DEPTH,
+    max_pages: int = 50,
+    delay: float = 1.0
 ) -> list[dict[str, Any]]:
-    """Recursively crawl internal links from start URLs up to a maximum depth."""
-    run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
-    dispatcher = build_dispatcher(max_concurrent)
+    """
+    Crawl a website recursively, one page at a time with proper domain filtering and error handling.
+    
+    Args:
+        crawler: The AsyncWebCrawler instance
+        start_url: The starting URL to crawl
+        max_depth: Maximum depth to crawl (default: 3)
+        max_pages: Maximum number of pages to crawl (default: 50)
+        delay: Delay between requests in seconds (default: 1.0)
+    
+    Returns:
+        List of dictionaries containing URL and markdown content
+    """
+    from urllib.parse import urljoin, urlparse
+    import asyncio
+    
     visited = set()
-    def normalize_url(url):
-        return urldefrag(url)[0]
-    current_urls = {normalize_url(u) for u in start_urls}
-    results_all = []
-    for _ in range(max_depth):
-        urls_to_crawl = [normalize_url(url) for url in current_urls if normalize_url(url) not in visited]
-        if not urls_to_crawl:
-            break
-        results = await crawler.arun_many(urls=urls_to_crawl, config=run_config, dispatcher=dispatcher)
-        next_level_urls = set()
-        for result in results:
-            norm_url = normalize_url(result.url)
-            visited.add(norm_url)
-            if result.success and result.markdown:
-                results_all.append({"url": result.url, "markdown": result.markdown})
-                for link in result.links.get("internal", []):
-                    next_url = normalize_url(link["href"])
-                    if next_url not in visited:
-                        next_level_urls.add(next_url)
-        current_urls = next_level_urls
-    return results_all
+    results = []
+    to_crawl = [(start_url, 0)]  # (url, depth)
+    base_domain = urlparse(start_url).netloc
+    
+    print(f"[INFO] Starting recursive crawl of {start_url} (max_depth={max_depth}, max_pages={max_pages})")
+    
+    while to_crawl and len(results) < max_pages:
+        url, depth = to_crawl.pop(0)
+        
+        # Skip if already visited or depth exceeded
+        if url in visited or depth > max_depth:
+            continue
+            
+        visited.add(url)
+        
+        try:
+            print(f"[INFO] Crawling [{len(results)+1}/{max_pages}] depth={depth}: {url}")
+            
+            # Configure crawler for single page
+            run_config = CrawlerRunConfig(
+                cache_mode=CacheMode.BYPASS,
+                stream=False,
+                word_count_threshold=10
+            )
+            
+            result = await crawler.arun(url=url, config=run_config)
+            
+            # Add delay between requests to be respectful
+            if delay > 0:
+                await asyncio.sleep(delay)
+            
+            if not result.success:
+                print(f"[WARNING] Failed to crawl {url}: {result.error_message}")
+                continue
+                
+            # Extract content - prefer markdown, fall back to HTML conversion
+            content = result.markdown
+            if not content and hasattr(result, 'html') and result.html:
+                try:
+                    content = html2text.html2text(result.html)
+                except Exception as e:
+                    print(f"[ERROR] Failed to convert HTML to markdown for {url}: {e}")
+                    continue
+            
+            if not content or len(content.strip()) < 50:
+                print(f"[WARNING] No meaningful content found for {url}")
+                continue
+                
+            # Store successful result
+            results.append({
+                "url": url,
+                "markdown": content,
+                "depth": depth,
+                "title": getattr(result, 'title', '') or '',
+                "word_count": len(content.split())
+            })
+            
+            print(f"[SUCCESS] Crawled {url} - {len(content)} chars, {len(content.split())} words")
+            
+            # Extract and queue internal links for next depth level
+            if depth < max_depth and hasattr(result, 'links'):
+                internal_links = result.links.get("internal", [])
+                for link_info in internal_links:
+                    if isinstance(link_info, dict) and "href" in link_info:
+                        link_url = link_info["href"]
+                    elif isinstance(link_info, str):
+                        link_url = link_info
+                    else:
+                        continue
+                        
+                    # Resolve relative URLs
+                    absolute_url = urljoin(url, link_url)
+                    
+                    # Remove fragments
+                    absolute_url = urldefrag(absolute_url)[0]
+                    
+                    # Filter by domain and avoid duplicates
+                    link_domain = urlparse(absolute_url).netloc
+                    if (link_domain == base_domain and 
+                        absolute_url not in visited and 
+                        absolute_url not in [u for u, d in to_crawl]):
+                        to_crawl.append((absolute_url, depth + 1))
+                        
+                print(f"[INFO] Found {len(internal_links)} internal links, queued {len([u for u, d in to_crawl if d == depth + 1])} new URLs")
+                
+        except Exception as e:
+            print(f"[ERROR] Exception while crawling {url}: {e}")
+            continue
+    
+    print(f"[INFO] Recursive crawl completed. Crawled {len(results)} pages from {start_url}")
+    return results
 
 def build_metadata(chunk: str, i: int, url: str, crawl_type: str = None, version: int = 1) -> dict:
     meta = extract_section_info(chunk)
@@ -364,7 +452,10 @@ async def monitor_documentation(ctx: Context, url: str, notes: str = None) -> st
                 return json.dumps({"success": False, "url": url, "error": "No URLs found in sitemap"}, indent=2)
             crawl_results = await crawl_batch(crawler, sitemap_urls, max_concurrent=MAX_CONCURRENT)
         else:
-            crawl_results = await crawl_recursive_internal_links(crawler, [url], max_depth=MAX_DEPTH, max_concurrent=MAX_CONCURRENT)
+            # Use the new recursive website crawler for webpages
+            crawl_results = await crawl_website_recursively(
+                crawler, url, max_depth=MAX_DEPTH, max_pages=100, delay=0.5
+            )
         if not crawl_results:
             return json.dumps({"success": False, "url": url, "error": "No content found"}, indent=2)
         urls, chunk_numbers, contents, metadatas = [], [], [], []
