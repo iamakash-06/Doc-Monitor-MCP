@@ -43,10 +43,20 @@ CREATE INDEX idx_crawled_pages_source ON crawled_pages ((metadata->>'source'));
 -- Create an index for version tracking
 CREATE INDEX idx_crawled_pages_version ON crawled_pages (url, version);
 
+-- Add full-text search capabilities
+CREATE INDEX idx_crawled_pages_content_fts ON crawled_pages USING gin(to_tsvector('english', content));
+
+-- Create a composite index for better query performance
+CREATE INDEX idx_crawled_pages_composite ON crawled_pages (url, version, chunk_number);
+
+-- Add index for better similarity filtering
+CREATE INDEX idx_crawled_pages_embedding_similarity ON crawled_pages USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
 -- Drop existing functions if they exist
 DROP FUNCTION IF EXISTS match_crawled_pages(vector, integer, jsonb);
 DROP FUNCTION IF EXISTS get_latest_version(varchar);
 DROP FUNCTION IF EXISTS compare_document_versions(varchar, integer, integer);
+DROP FUNCTION IF EXISTS enhanced_match_crawled_pages(vector, integer, float, jsonb);
 
 -- Create a function to search for documentation chunks
 create or replace function match_crawled_pages (
@@ -79,6 +89,71 @@ begin
   where metadata @> filter
   order by crawled_pages.embedding <=> query_embedding
   limit match_count;
+end;
+$$;
+
+-- Enhanced search function with similarity threshold and flexible filtering
+create or replace function enhanced_match_crawled_pages (
+  query_embedding vector(1536),
+  match_count int default 10,
+  similarity_threshold float default 0.3,
+  filter jsonb DEFAULT '{}'::jsonb
+) returns table (
+  id bigint,
+  url varchar,
+  chunk_number integer,
+  content text,
+  metadata jsonb,
+  similarity float,
+  version integer
+)
+language plpgsql
+as $$
+#variable_conflict use_column
+declare
+  filter_condition text := '';
+  key text;
+  value text;
+begin
+  -- Build dynamic filter conditions for more flexible filtering
+  if filter != '{}'::jsonb then
+    for key, value in select * from jsonb_each_text(filter) loop
+      if filter_condition != '' then
+        filter_condition := filter_condition || ' AND ';
+      end if;
+      
+      -- Handle different filter types
+      if key = 'source' then
+        filter_condition := filter_condition || format('metadata->>%L = %L', key, value);
+      elsif key = 'path' then
+        filter_condition := filter_condition || format('metadata->>%L = %L', key, value);
+      elsif key = 'method' then
+        filter_condition := filter_condition || format('metadata->>%L = %L', key, value);
+      elsif key = 'section' then
+        filter_condition := filter_condition || format('metadata->>%L = %L', key, value);
+      else
+        -- Default: exact match for other metadata fields
+        filter_condition := filter_condition || format('metadata->>%L = %L', key, value);
+      end if;
+    end loop;
+  end if;
+
+  return query execute format('
+    select
+      cp.id,
+      cp.url,
+      cp.chunk_number,
+      cp.content,
+      cp.metadata,
+      1 - (cp.embedding <=> $1) as similarity,
+      cp.version
+    from crawled_pages cp
+    where (1 - (cp.embedding <=> $1)) >= $3
+    %s
+    order by cp.embedding <=> $1
+    limit $2',
+    case when filter_condition != '' then 'AND ' || filter_condition else '' end
+  ) using query_embedding, match_count, similarity_threshold;
 end;
 $$;
 

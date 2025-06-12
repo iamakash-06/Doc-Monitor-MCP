@@ -44,8 +44,8 @@ docker build -t doc-monitor .
 ### Local Development
 
 ```bash
-git clone https://github.com/iamakash-06/doc-monitor.git
-cd doc-monitor
+git clone https://github.com/iamakash-06/Doc-Monitor-MCP.git
+cd Doc-Monitor-MCP
 pip install uv
 uv venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate

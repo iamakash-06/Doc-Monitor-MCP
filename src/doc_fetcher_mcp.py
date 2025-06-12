@@ -26,7 +26,7 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from utils import (
     get_supabase_client, batch_upsert_documents, semantic_search_documents, is_openapi_url,
     fetch_openapi_spec, openapi_spec_to_markdown_chunks, is_sitemap, is_txt, parse_sitemap,
-    smart_chunk_markdown, extract_section_info
+    smart_chunk_markdown, extract_section_info, improved_semantic_search, semantic_chunk_markdown
 )
 
 # =========================
@@ -301,7 +301,7 @@ async def check_document_changes(ctx: Context, url: str) -> str:
         result = await crawler.arun(url=url, config=run_config)
         if not result.success or not result.markdown:
             return json.dumps({"success": False, "url": url, "error": "Failed to crawl document"}, indent=2)
-        chunks = smart_chunk_markdown(result.markdown)
+        chunks = semantic_chunk_markdown(result.markdown)
         if current_version == 0:
             urls, chunk_numbers, contents, metadatas = [], [], [], []
             for i, chunk in enumerate(chunks):
@@ -462,7 +462,7 @@ async def monitor_documentation(ctx: Context, url: str, notes: str = None) -> st
         for doc in crawl_results:
             source_url = doc['url']
             md = doc['markdown']
-            chunks = smart_chunk_markdown(md, chunk_size=CHUNK_SIZE)
+            chunks = semantic_chunk_markdown(md)
             for i, chunk in enumerate(chunks):
                 urls.append(source_url)
                 chunk_numbers.append(i)
@@ -524,7 +524,7 @@ async def check_and_update_document_changes(ctx: Context, url: str) -> dict:
         result = await crawler.arun(url=url, config=run_config)
         if not result.success or not result.markdown:
             return {"success": False, "url": url, "error": "Failed to crawl document"}
-        chunks = smart_chunk_markdown(result.markdown)
+        chunks = semantic_chunk_markdown(result.markdown)
         if current_version == 0:
             urls, chunk_numbers, contents, metadatas = [], [], [], []
             for i, chunk in enumerate(chunks):
@@ -638,6 +638,84 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
             filter_metadata["method"] = method.upper()
         docs = semantic_search_documents(supabase_client, query, match_count, filter_metadata if filter_metadata else None)
         return json.dumps({"success": True, "query": query, "filter": filter_metadata, "context_documents": docs, "count": len(docs)}, indent=2)
+    except Exception as e:
+        return json.dumps({"success": False, "query": query, "error": str(e)}, indent=2)
+
+@mcp.tool()
+async def advanced_rag_query(ctx: Context, query: str, source: str = None, match_count: int = 5, endpoint: str = None, method: str = None, similarity_threshold: float = 0.3, enable_reranking: bool = True) -> str:
+    """
+    Perform an advanced RAG query with improved semantic search, hybrid retrieval, and reranking.
+    
+    Args:
+        query: The search query
+        source: Filter by source domain (optional)
+        match_count: Number of results to return (default: 5)
+        endpoint: Filter by API endpoint path (optional)
+        method: Filter by HTTP method (optional)
+        similarity_threshold: Minimum similarity score (0-1, default: 0.3)
+        enable_reranking: Whether to enable result reranking (default: True)
+    
+    Returns:
+        JSON with improved search results and metadata
+    """
+    try:
+        supabase_client = ctx.request_context.lifespan_context.supabase_client
+        
+        # Build filter metadata
+        filter_metadata = {}
+        if source:
+            filter_metadata["source"] = source
+        if endpoint:
+            filter_metadata["path"] = endpoint
+        if method:
+            filter_metadata["method"] = method.upper()
+        
+        # Use improved semantic search
+        docs = improved_semantic_search(
+            supabase_client, 
+            query, 
+            match_count=match_count,
+            filter_metadata=filter_metadata if filter_metadata else None,
+            similarity_threshold=similarity_threshold,
+            enable_reranking=enable_reranking
+        )
+        
+        # Add query analysis
+        query_analysis = {
+            "original_query": query,
+            "filter_applied": filter_metadata,
+            "similarity_threshold": similarity_threshold,
+            "reranking_enabled": enable_reranking,
+            "results_found": len(docs)
+        }
+        
+        # Enhance results with additional metadata
+        enhanced_docs = []
+        for doc in docs:
+            enhanced_doc = dict(doc)
+            
+            # Add relevance indicators
+            content = doc.get('content', '').lower()
+            query_terms = set(query.lower().split())
+            
+            enhanced_doc['relevance_indicators'] = {
+                'similarity_score': doc.get('similarity', 0),
+                'rerank_score': doc.get('rerank_score'),
+                'exact_matches': sum(1 for term in query_terms if term in content),
+                'content_length': len(doc.get('content', '')),
+                'chunk_number': doc.get('chunk_number', 0)
+            }
+            
+            enhanced_docs.append(enhanced_doc)
+        
+        return json.dumps({
+            "success": True,
+            "query_analysis": query_analysis,
+            "context_documents": enhanced_docs,
+            "count": len(enhanced_docs),
+            "search_method": "advanced_semantic_search_with_reranking"
+        }, indent=2)
+        
     except Exception as e:
         return json.dumps({"success": False, "query": query, "error": str(e)}, indent=2)
 

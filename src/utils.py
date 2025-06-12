@@ -197,6 +197,217 @@ def semantic_search_documents(
         print(f"Error searching documents: {e}")
         return []
 
+def improved_semantic_search(
+    client: Client,
+    query: str,
+    match_count: int = 10,
+    filter_metadata: Optional[Dict[str, Any]] = None,
+    similarity_threshold: float = 0.3,
+    enable_reranking: bool = True
+) -> List[Dict[str, Any]]:
+    """
+    Improved semantic search with query preprocessing, hybrid search, and reranking.
+    
+    Args:
+        client: Supabase client
+        query: Search query
+        match_count: Number of results to return
+        filter_metadata: Metadata filters
+        similarity_threshold: Minimum similarity score (0-1)
+        enable_reranking: Whether to enable reranking
+    
+    Returns:
+        List of improved search results
+    """
+    try:
+        # 1. Preprocess query for better embedding
+        processed_query = _preprocess_query(query)
+        
+        # 2. Get initial vector search results (get more for reranking)
+        initial_count = match_count * 3 if enable_reranking else match_count
+        vector_results = _enhanced_vector_search(
+            client, processed_query, initial_count, filter_metadata, similarity_threshold
+        )
+        
+        if not vector_results:
+            return []
+        
+        # 3. Optional: Add keyword/BM25-style search for hybrid approach
+        keyword_results = _keyword_search(client, query, filter_metadata)
+        
+        # 4. Combine and deduplicate results
+        combined_results = _combine_search_results(vector_results, keyword_results)
+        
+        # 5. Rerank results if enabled
+        if enable_reranking and len(combined_results) > match_count:
+            final_results = _rerank_results(query, combined_results, match_count)
+        else:
+            final_results = combined_results[:match_count]
+        
+        return final_results
+        
+    except Exception as e:
+        print(f"Error in improved semantic search: {e}")
+        # Fallback to original search
+        return semantic_search_documents(client, query, match_count, filter_metadata)
+
+def _preprocess_query(query: str) -> str:
+    """Preprocess query for better embedding quality."""
+    import re
+    
+    # Remove excessive whitespace
+    query = re.sub(r'\s+', ' ', query.strip())
+    
+    # Expand common abbreviations and technical terms
+    expansions = {
+        'api': 'API application programming interface',
+        'auth': 'authentication authorization',
+        'db': 'database',
+        'ui': 'user interface',
+        'ux': 'user experience',
+        'ssl': 'SSL secure socket layer',
+        'http': 'HTTP hypertext transfer protocol',
+        'json': 'JSON javascript object notation',
+        'xml': 'XML extensible markup language'
+    }
+    
+    query_lower = query.lower()
+    for abbrev, expansion in expansions.items():
+        if abbrev in query_lower:
+            query = f"{query} {expansion}"
+    
+    return query
+
+def _enhanced_vector_search(
+    client: Client,
+    query: str, 
+    match_count: int,
+    filter_metadata: Optional[Dict[str, Any]],
+    similarity_threshold: float
+) -> List[Dict[str, Any]]:
+    """Enhanced vector search with similarity threshold."""
+    query_embedding = create_single_embedding(query)
+    
+    try:
+        params = {
+            'query_embedding': query_embedding,
+            'match_count': match_count,
+            'similarity_threshold': similarity_threshold
+        }
+        if filter_metadata:
+            params['filter'] = filter_metadata
+            
+        result = client.rpc('enhanced_match_crawled_pages', params).execute()
+        return result.data or []
+    except Exception as e:
+        print(f"Enhanced search failed, falling back to basic search: {e}")
+        # Fallback to original function
+        return semantic_search_documents(client, query, match_count, filter_metadata)
+
+def _keyword_search(
+    client: Client,
+    query: str,
+    filter_metadata: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """Perform keyword-based search for hybrid results."""
+    try:
+        # Simple keyword search using basic text matching
+        # We'll use a simple ILIKE search instead of full-text search for compatibility
+        search_terms = query.lower().split()
+        
+        if not search_terms:
+            return []
+        
+        # Build a basic query
+        base_query = client.table("crawled_pages").select(
+            "id, url, chunk_number, content, metadata, version"
+        )
+        
+        # For keyword search, we'll use simple ILIKE pattern matching
+        # This is more compatible with the Supabase client
+        search_pattern = f"%{' '.join(search_terms)}%"
+        base_query = base_query.ilike("content", search_pattern)
+        
+        # Apply metadata filter if provided
+        if filter_metadata:
+            for key, value in filter_metadata.items():
+                base_query = base_query.eq(f"metadata->>{key}", value)
+        
+        # Execute the query
+        result = base_query.execute()
+        
+        # Add similarity score to results (fixed score of 0.5 for keyword matches)
+        results = result.data or []
+        for item in results:
+            item['similarity'] = 0.5
+        
+        return results[:10]  # Limit to 10 results
+        
+    except Exception as e:
+        print(f"Keyword search failed: {e}")
+        return []
+
+def _combine_search_results(
+    vector_results: List[Dict[str, Any]], 
+    keyword_results: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Combine and deduplicate search results."""
+    seen_chunks = set()
+    combined = []
+    
+    # Add vector results first (higher priority)
+    for result in vector_results:
+        chunk_id = (result.get('url'), result.get('chunk_number'))
+        if chunk_id not in seen_chunks:
+            seen_chunks.add(chunk_id)
+            combined.append(result)
+    
+    # Add keyword results that weren't already included
+    for result in keyword_results:
+        chunk_id = (result.get('url'), result.get('chunk_number'))
+        if chunk_id not in seen_chunks:
+            seen_chunks.add(chunk_id)
+            combined.append(result)
+    
+    return combined
+
+def _rerank_results(query: str, results: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+    """Rerank results using cross-encoder or heuristic scoring."""
+    try:
+        # Simple heuristic reranking (you could use a cross-encoder model here)
+        query_terms = set(query.lower().split())
+        
+        for result in results:
+            content = result.get('content', '').lower()
+            metadata = result.get('metadata', {})
+            
+            # Base score from similarity
+            base_score = float(result.get('similarity', 0))
+            
+            # Boost for exact query term matches
+            exact_matches = sum(1 for term in query_terms if term in content)
+            exact_match_boost = exact_matches * 0.1
+            
+            # Boost for title/header matches
+            headers = metadata.get('headers', '')
+            header_boost = 0.15 if any(term in headers.lower() for term in query_terms) else 0
+            
+            # Boost for metadata relevance
+            section_boost = 0.1 if metadata.get('section') in ['info', 'endpoint'] else 0
+            
+            # Calculate final score
+            final_score = base_score + exact_match_boost + header_boost + section_boost
+            result['rerank_score'] = final_score
+        
+        # Sort by rerank score and return top_k
+        reranked = sorted(results, key=lambda x: x.get('rerank_score', 0), reverse=True)
+        return reranked[:top_k]
+        
+    except Exception as e:
+        print(f"Reranking failed: {e}")
+        # Fallback to original order
+        return results[:top_k]
+
 # --- OpenAPI Utilities ---
 
 def is_openapi_url(url: str) -> bool:
@@ -350,6 +561,118 @@ def smart_chunk_markdown(text: str, chunk_size: int = 5000) -> List[str]:
             chunks.append(chunk)
         start = end
     return chunks
+
+def semantic_chunk_markdown(text: str, target_chunk_size: int = 1500, overlap_size: int = 200) -> List[str]:
+    """
+    Improved chunking that creates semantic chunks with overlaps for better retrieval.
+    
+    Args:
+        text: The markdown text to chunk
+        target_chunk_size: Target size for each chunk (smaller for better semantic coherence)
+        overlap_size: Overlap between chunks to maintain context
+    
+    Returns:
+        List of text chunks with semantic boundaries and overlaps
+    """
+    import re
+    
+    # First, split by major sections (headers)
+    sections = re.split(r'\n(?=#+\s)', text)
+    
+    chunks = []
+    current_chunk = ""
+    
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+            
+        # If section alone is larger than target, split it further
+        if len(section) > target_chunk_size:
+            # If we have a current chunk, add it first
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+            
+            # Split large section into smaller parts
+            section_chunks = _split_large_section(section, target_chunk_size, overlap_size)
+            chunks.extend(section_chunks)
+        else:
+            # Check if adding this section would exceed target size
+            if len(current_chunk) + len(section) > target_chunk_size and current_chunk:
+                # Add current chunk and start new one with overlap
+                chunks.append(current_chunk.strip())
+                
+                # Create overlap from end of previous chunk
+                overlap = _get_overlap_text(current_chunk, overlap_size)
+                current_chunk = overlap + "\n\n" + section if overlap else section
+            else:
+                # Add section to current chunk
+                current_chunk = current_chunk + "\n\n" + section if current_chunk else section
+    
+    # Add final chunk if exists
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    # Filter out very small chunks (less than 100 characters)
+    return [chunk for chunk in chunks if len(chunk) >= 100]
+
+def _split_large_section(text: str, target_size: int, overlap_size: int) -> List[str]:
+    """Split a large section into smaller chunks with overlaps."""
+    chunks = []
+    start = 0
+    
+    while start < len(text):
+        end = start + target_size
+        
+        if end >= len(text):
+            chunks.append(text[start:].strip())
+            break
+        
+        # Find best split point
+        chunk_text = text[start:end]
+        
+        # Try to split at paragraph breaks first
+        last_para = chunk_text.rfind('\n\n')
+        if last_para > target_size * 0.6:
+            end = start + last_para
+        else:
+            # Try sentence boundaries
+            last_sentence = chunk_text.rfind('. ')
+            if last_sentence > target_size * 0.6:
+                end = start + last_sentence + 1
+            else:
+                # Try line breaks
+                last_line = chunk_text.rfind('\n')
+                if last_line > target_size * 0.6:
+                    end = start + last_line
+        
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        
+        # Move start back by overlap_size to create overlap
+        start = max(start + len(chunk) - overlap_size, end - overlap_size)
+        if start >= end:
+            start = end
+    
+    return chunks
+
+def _get_overlap_text(text: str, overlap_size: int) -> str:
+    """Get overlap text from the end of a chunk."""
+    if len(text) <= overlap_size:
+        return text
+    
+    # Try to get overlap at sentence boundary
+    overlap_start = len(text) - overlap_size
+    overlap_text = text[overlap_start:]
+    
+    # Find first sentence start in overlap
+    first_sentence = overlap_text.find('. ')
+    if first_sentence != -1 and first_sentence < overlap_size * 0.5:
+        return overlap_text[first_sentence + 2:]
+    
+    return overlap_text
 
 def extract_section_info(chunk: str) -> Dict[str, Any]:
     """Extract headers and stats from a markdown chunk."""
