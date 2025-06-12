@@ -9,24 +9,23 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
-from urllib.parse import urlparse, urldefrag, urljoin
-from xml.etree import ElementTree
 from dotenv import load_dotenv
 from supabase import Client
 from pathlib import Path
-import requests
 import asyncio
 import json
 import os
-import re
 from datetime import datetime
-import html2text
 
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
+from crawl4ai import AsyncWebCrawler, BrowserConfig
 from utils import (
     get_supabase_client, batch_upsert_documents, semantic_search_documents, is_openapi_url,
     fetch_openapi_spec, openapi_spec_to_markdown_chunks, is_sitemap, is_txt, parse_sitemap,
-    smart_chunk_markdown, extract_section_info, improved_semantic_search, semantic_chunk_markdown
+    smart_chunk_markdown, extract_section_info, improved_semantic_search, semantic_chunk_markdown,
+    crawl_markdown_file, build_dispatcher, crawl_batch, crawl_website_recursively,
+    build_metadata, analyze_change_impact, check_and_update_document_changes,
+    process_openapi_documentation, process_sitemap_documentation, 
+    process_text_file_documentation, process_website_documentation
 )
 
 # =========================
@@ -78,211 +77,8 @@ mcp = FastMCP(
 )
 
 # =========================
-# Helper Functions
+# MCP-Specific Configuration
 # =========================
-async def crawl_markdown_file(crawler: AsyncWebCrawler, url: str) -> list[dict[str, Any]]:
-    """Crawl a .txt or markdown file and return a list of dicts with URL and markdown content."""
-    crawl_config = CrawlerRunConfig()
-    result = await crawler.arun(url=url, config=crawl_config)
-    if result.success and result.markdown:
-        return [{"url": url, "markdown": result.markdown}]
-    print(f"Failed to crawl {url}: {result.error_message}")
-    return []
-
-def build_dispatcher(max_concurrent: int) -> MemoryAdaptiveDispatcher:
-    return MemoryAdaptiveDispatcher(
-        memory_threshold_percent=MEMORY_THRESHOLD_PERCENT,
-        check_interval=CHECK_INTERVAL,
-        max_session_permit=max_concurrent
-    )
-
-async def crawl_batch(crawler: AsyncWebCrawler, urls: list[str], max_concurrent: int = MAX_CONCURRENT) -> list[dict[str, Any]]:
-    """Batch crawl multiple URLs in parallel."""
-    print(f"[DEBUG] crawl_batch: Starting batch crawl for {len(urls)} URLs with max_concurrent={max_concurrent}")
-    crawl_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
-    dispatcher = build_dispatcher(max_concurrent)
-    try:
-        results = await crawler.arun_many(urls=urls, config=crawl_config, dispatcher=dispatcher)
-        print(f"[DEBUG] crawl_batch: Finished batch crawl, got {len(results)} results")
-        return [
-            {"url": r.url, "markdown": r.markdown}
-            for r in results if r.success and r.markdown
-        ]
-    except Exception as e:
-        print(f"[ERROR] Exception in crawl_batch: {e}")
-        return []
-
-async def crawl_website_recursively(
-    crawler: AsyncWebCrawler,
-    start_url: str,
-    max_depth: int = MAX_DEPTH,
-    max_pages: int = 50,
-    delay: float = 1.0
-) -> list[dict[str, Any]]:
-    """
-    Crawl a website recursively, one page at a time with proper domain filtering and error handling.
-    
-    Args:
-        crawler: The AsyncWebCrawler instance
-        start_url: The starting URL to crawl
-        max_depth: Maximum depth to crawl (default: 3)
-        max_pages: Maximum number of pages to crawl (default: 50)
-        delay: Delay between requests in seconds (default: 1.0)
-    
-    Returns:
-        List of dictionaries containing URL and markdown content
-    """
-    from urllib.parse import urljoin, urlparse
-    import asyncio
-    
-    visited = set()
-    results = []
-    to_crawl = [(start_url, 0)]  # (url, depth)
-    base_domain = urlparse(start_url).netloc
-    
-    print(f"[INFO] Starting recursive crawl of {start_url} (max_depth={max_depth}, max_pages={max_pages})")
-    
-    while to_crawl and len(results) < max_pages:
-        url, depth = to_crawl.pop(0)
-        
-        # Skip if already visited or depth exceeded
-        if url in visited or depth > max_depth:
-            continue
-            
-        visited.add(url)
-        
-        try:
-            print(f"[INFO] Crawling [{len(results)+1}/{max_pages}] depth={depth}: {url}")
-            
-            # Configure crawler for single page
-            run_config = CrawlerRunConfig(
-                cache_mode=CacheMode.BYPASS,
-                stream=False,
-                word_count_threshold=10
-            )
-            
-            result = await crawler.arun(url=url, config=run_config)
-            
-            # Add delay between requests to be respectful
-            if delay > 0:
-                await asyncio.sleep(delay)
-            
-            if not result.success:
-                print(f"[WARNING] Failed to crawl {url}: {result.error_message}")
-                continue
-                
-            # Extract content - prefer markdown, fall back to HTML conversion
-            content = result.markdown
-            if not content and hasattr(result, 'html') and result.html:
-                try:
-                    content = html2text.html2text(result.html)
-                except Exception as e:
-                    print(f"[ERROR] Failed to convert HTML to markdown for {url}: {e}")
-                    continue
-            
-            if not content or len(content.strip()) < 50:
-                print(f"[WARNING] No meaningful content found for {url}")
-                continue
-                
-            # Store successful result
-            results.append({
-                "url": url,
-                "markdown": content,
-                "depth": depth,
-                "title": getattr(result, 'title', '') or '',
-                "word_count": len(content.split())
-            })
-            
-            print(f"[SUCCESS] Crawled {url} - {len(content)} chars, {len(content.split())} words")
-            
-            # Extract and queue internal links for next depth level
-            if depth < max_depth and hasattr(result, 'links'):
-                internal_links = result.links.get("internal", [])
-                for link_info in internal_links:
-                    if isinstance(link_info, dict) and "href" in link_info:
-                        link_url = link_info["href"]
-                    elif isinstance(link_info, str):
-                        link_url = link_info
-                    else:
-                        continue
-                        
-                    # Resolve relative URLs
-                    absolute_url = urljoin(url, link_url)
-                    
-                    # Remove fragments
-                    absolute_url = urldefrag(absolute_url)[0]
-                    
-                    # Filter by domain and avoid duplicates
-                    link_domain = urlparse(absolute_url).netloc
-                    if (link_domain == base_domain and 
-                        absolute_url not in visited and 
-                        absolute_url not in [u for u, d in to_crawl]):
-                        to_crawl.append((absolute_url, depth + 1))
-                        
-                print(f"[INFO] Found {len(internal_links)} internal links, queued {len([u for u, d in to_crawl if d == depth + 1])} new URLs")
-                
-        except Exception as e:
-            print(f"[ERROR] Exception while crawling {url}: {e}")
-            continue
-    
-    print(f"[INFO] Recursive crawl completed. Crawled {len(results)} pages from {start_url}")
-    return results
-
-def build_metadata(chunk: str, i: int, url: str, crawl_type: str = None, version: int = 1) -> dict:
-    meta = extract_section_info(chunk)
-    meta.update({
-        "chunk_index": i,
-        "url": url,
-        "source": urlparse(url).netloc,
-        "version": version,
-        "crawl_time": str(asyncio.current_task().get_coro().__name__)
-    })
-    if crawl_type:
-        meta["crawl_type"] = crawl_type
-    return meta
-
-def analyze_change_impact(change: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Analyze the impact of a change and provide recommendations.
-    """
-    analysis = {
-        "severity": change.get("change_impact", "low"),
-        "recommendations": [],
-        "breaking_changes": False,
-        "api_changes": False
-    }
-    old_content = change.get("change_details", {}).get("old_content", "") or ""
-    new_content = change.get("change_details", {}).get("new_content", "") or ""
-    api_patterns = [
-        r"api\s+endpoint", r"api\s+version", r"request\s+parameters", r"response\s+format",
-        r"http\s+method", r"authentication", r"headers", r"query\s+parameters"
-    ]
-    breaking_patterns = [
-        r"breaking\s+change", r"deprecated", r"removed", r"no longer supported", r"changed from", r"replaced by"
-    ]
-    for pattern in api_patterns:
-        if re.search(pattern, new_content, re.IGNORECASE):
-            analysis["api_changes"] = True
-            analysis["recommendations"].append(
-                "API changes detected. Review API documentation and update client code if necessary."
-            )
-            break
-    for pattern in breaking_patterns:
-        if re.search(pattern, new_content, re.IGNORECASE):
-            analysis["breaking_changes"] = True
-            analysis["severity"] = "high"
-            analysis["recommendations"].append(
-                "Breaking changes detected. Immediate action required to update dependent systems."
-            )
-            break
-    change_type = change.get("change_type", "unknown")
-    if change_type == "added":
-        analysis["recommendations"].append("New content added. Review for new features or functionality.")
-    elif change_type == "deleted":
-        analysis["recommendations"].append("Content removed. Check if removed functionality needs to be replaced.")
-    elif change_type == "modified":
-        analysis["recommendations"].append("Content modified. Review changes for impact on existing functionality.")
-    return analysis
 
 # =========================
 # MCP Tool Functions
@@ -295,100 +91,8 @@ async def check_document_changes(ctx: Context, url: str) -> str:
     try:
         crawler = ctx.request_context.lifespan_context.crawler
         supabase_client = ctx.request_context.lifespan_context.supabase_client
-        result = supabase_client.rpc('get_latest_version', {'p_url': url}).execute()
-        current_version = result.data if result.data is not None else 0
-        run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
-        result = await crawler.arun(url=url, config=run_config)
-        if not result.success or not result.markdown:
-            return json.dumps({"success": False, "url": url, "error": "Failed to crawl document"}, indent=2)
-        chunks = semantic_chunk_markdown(result.markdown)
-        if current_version == 0:
-            urls, chunk_numbers, contents, metadatas = [], [], [], []
-            for i, chunk in enumerate(chunks):
-                urls.append(url)
-                chunk_numbers.append(i)
-                contents.append(chunk)
-                metadatas.append(build_metadata(chunk, i, url, version=1))
-            url_to_full_document = {url: result.markdown}
-            try:
-                batch_upsert_documents(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
-            except Exception as e:
-                print(f"[ERROR] Exception in batch_upsert_documents: {e}")
-                raise
-            return json.dumps({"success": True, "url": url, "message": "First version of document stored", "version": 1}, indent=2)
-        current_content = supabase_client.table("crawled_pages")\
-            .select("content")\
-            .eq("url", url)\
-            .eq("version", current_version)\
-            .order("chunk_number")\
-            .execute()
-        if not current_content.data:
-            return json.dumps({"success": False, "url": url, "error": "Could not find current version content in database"}, indent=2)
-        current_text = "\n".join(chunk["content"] for chunk in current_content.data if chunk.get("content"))
-        if current_text == result.markdown:
-            return json.dumps({"success": True, "url": url, "message": "No changes detected", "current_version": current_version, "changes_found": 0}, indent=2)
-        new_version = current_version + 1
-        urls, chunk_numbers, contents, metadatas = [], [], [], []
-        for i, chunk in enumerate(chunks):
-            urls.append(url)
-            chunk_numbers.append(i)
-            contents.append(chunk)
-            metadatas.append(build_metadata(chunk, i, url, version=new_version))
-        url_to_full_document = {url: result.markdown}
-        try:
-            batch_upsert_documents(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
-        except Exception as e:
-            print(f"[ERROR] Exception in batch_upsert_documents: {e}")
-            raise
-        try:
-            comparison = supabase_client.rpc(
-                'compare_document_versions',
-                {'url': url, 'old_version': current_version, 'new_version': new_version}
-            ).execute()
-            changes = []
-            if comparison and comparison.data:
-                for change in comparison.data:
-                    if not change:
-                        continue
-                    change_type = change.get("change_type", "unknown")
-                    change_summary = change.get("change_summary", "No summary available")
-                    change_impact = change.get("change_impact", "low")
-                    change_details = change.get("change_details", {}) or {}
-                    change_obj = {
-                        "change_type": change_type,
-                        "change_summary": change_summary,
-                        "change_impact": change_impact,
-                        "change_details": change_details
-                    }
-                    impact_analysis = analyze_change_impact(change_obj)
-                    changes.append({
-                        "type": change_type,
-                        "summary": change_summary,
-                        "impact": change_impact,
-                        "details": change_details,
-                        "analysis": impact_analysis
-                    })
-                if changes:
-                    change_record = {
-                        "url": url,
-                        "version": new_version,
-                        "change_type": "multiple" if len(changes) > 1 else changes[0]["type"],
-                        "change_summary": f"Found {len(changes)} changes in version {new_version}",
-                        "change_impact": max(c["impact"] for c in changes),
-                        "change_details": {"changes": changes}
-                    }
-                    supabase_client.table("document_changes").upsert(change_record, on_conflict="url,version").execute()
-            return json.dumps({
-                "success": True,
-                "url": url,
-                "old_version": current_version,
-                "new_version": new_version,
-                "changes_found": len(changes),
-                "changes": changes
-            }, indent=2)
-        except Exception as e:
-            print(f"[ERROR] Exception in version comparison: {e}")
-            return json.dumps({"success": False, "url": url, "error": f"Error comparing versions: {str(e)}"}, indent=2)
+        result = await check_and_update_document_changes(crawler, supabase_client, url)
+        return json.dumps(result, indent=2)
     except Exception as e:
         print(f"[ERROR] Exception in check_document_changes: {e}")
         return json.dumps({"success": False, "url": url, "error": str(e)}, indent=2)
@@ -400,9 +104,14 @@ async def monitor_documentation(ctx: Context, url: str, notes: str = None) -> st
     """
     try:
         supabase_client = ctx.request_context.lifespan_context.supabase_client
+        crawler = ctx.request_context.lifespan_context.crawler
+        
+        # Check if already monitored
         existing = supabase_client.table("monitored_documentations").select("id, status").eq("url", url).execute()
         if existing.data and any(doc.get("status") == "active" for doc in existing.data):
             return json.dumps({"success": False, "url": url, "error": "Documentation already monitored"}, indent=2)
+        
+        # Determine crawl type
         crawl_type = "webpage"
         if is_openapi_url(url):
             crawl_type = "openapi"
@@ -410,6 +119,8 @@ async def monitor_documentation(ctx: Context, url: str, notes: str = None) -> st
             crawl_type = "text_file"
         elif is_sitemap(url):
             crawl_type = "sitemap"
+        
+        # Insert monitoring record
         insert_data = {
             "url": url,
             "crawl_type": crawl_type,
@@ -418,73 +129,76 @@ async def monitor_documentation(ctx: Context, url: str, notes: str = None) -> st
             "date_added": datetime.utcnow().isoformat()
         }
         supabase_client.table("monitored_documentations").upsert(insert_data, on_conflict="url").execute()
-        crawler = ctx.request_context.lifespan_context.crawler
-        crawl_results = []
-        chunk_count = 0
-        if crawl_type == "openapi":
-            spec = fetch_openapi_spec(url)
-            if not spec:
-                return json.dumps({"success": False, "url": url, "error": "Could not fetch or parse OpenAPI spec"}, indent=2)
-            openapi_chunks = openapi_spec_to_markdown_chunks(spec, chunk_size=CHUNK_SIZE)
-            urls = [url] * len(openapi_chunks)
-            chunk_numbers = list(range(len(openapi_chunks)))
-            contents = [c['content'] for c in openapi_chunks]
-            metadatas = [dict(c['metadata'], url=url, source=urlparse(url).netloc, crawl_type='openapi', version=1) for c in openapi_chunks]
-            url_to_full_document = {url: json.dumps(spec, indent=2)}
-            batch_upsert_documents(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=20)
+        
+        # Process documentation based on type
+        try:
+            if crawl_type == "openapi":
+                crawl_results, chunk_count = await process_openapi_documentation(supabase_client, url, CHUNK_SIZE)
+                message = "OpenAPI spec processed and stored"
+            elif crawl_type == "text_file":
+                crawl_results = await process_text_file_documentation(crawler, url)
+                chunk_count = await _process_crawl_results(supabase_client, crawl_results, crawl_type)
+                message = "Text file processed and stored"
+            elif crawl_type == "sitemap":
+                crawl_results = await process_sitemap_documentation(crawler, url, MAX_CONCURRENT)
+                chunk_count = await _process_crawl_results(supabase_client, crawl_results, crawl_type)
+                message = "Sitemap processed and stored"
+            else:
+                crawl_results = await process_website_documentation(crawler, url, MAX_DEPTH, 100, 0.5)
+                chunk_count = await _process_crawl_results(supabase_client, crawl_results, crawl_type)
+                message = "Website processed and stored"
+            
+            if not crawl_results:
+                return json.dumps({"success": False, "url": url, "error": "No content found"}, indent=2)
+            
+            # Record initial change
             change_record = {
                 "url": url,
                 "version": 1,
                 "change_type": "added",
                 "change_summary": "Initial version indexed",
                 "change_impact": "high",
-                "change_details": {"chunks": len(openapi_chunks)},
+                "change_details": {"chunks": chunk_count},
                 "created_at": datetime.utcnow().isoformat()
             }
             supabase_client.table("document_changes").upsert(change_record, on_conflict="url,version").execute()
             supabase_client.table("monitored_documentations").update({"last_crawled_at": datetime.utcnow().isoformat()}).eq("url", url).execute()
-            return json.dumps({"success": True, "url": url, "crawl_type": crawl_type, "chunks_stored": len(openapi_chunks), "message": "OpenAPI spec processed and stored"}, indent=2)
-        elif crawl_type == "text_file":
-            crawl_results = await crawl_markdown_file(crawler, url)
-        elif crawl_type == "sitemap":
-            sitemap_urls = parse_sitemap(url)
-            if not sitemap_urls:
-                return json.dumps({"success": False, "url": url, "error": "No URLs found in sitemap"}, indent=2)
-            crawl_results = await crawl_batch(crawler, sitemap_urls, max_concurrent=MAX_CONCURRENT)
-        else:
-            # Use the new recursive website crawler for webpages
-            crawl_results = await crawl_website_recursively(
-                crawler, url, max_depth=MAX_DEPTH, max_pages=100, delay=0.5
-            )
-        if not crawl_results:
-            return json.dumps({"success": False, "url": url, "error": "No content found"}, indent=2)
-        urls, chunk_numbers, contents, metadatas = [], [], [], []
-        for doc in crawl_results:
-            source_url = doc['url']
-            md = doc['markdown']
-            chunks = semantic_chunk_markdown(md)
-            for i, chunk in enumerate(chunks):
-                urls.append(source_url)
-                chunk_numbers.append(i)
-                contents.append(chunk)
-                metadatas.append(build_metadata(chunk, i, source_url, crawl_type=crawl_type, version=1))
-                chunk_count += 1
-        url_to_full_document = {doc['url']: doc['markdown'] for doc in crawl_results}
-        batch_upsert_documents(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=20)
-        change_record = {
-            "url": url,
-            "version": 1,
-            "change_type": "added",
-            "change_summary": "Initial version indexed",
-            "change_impact": "high",
-            "change_details": {"chunks": chunk_count},
-            "created_at": datetime.utcnow().isoformat()
-        }
-        supabase_client.table("document_changes").upsert(change_record, on_conflict="url,version").execute()
-        supabase_client.table("monitored_documentations").update({"last_crawled_at": datetime.utcnow().isoformat()}).eq("url", url).execute()
-        return json.dumps({"success": True, "url": url, "crawl_type": crawl_type, "pages_crawled": len(crawl_results), "chunks_stored": chunk_count, "message": "Documentation processed and stored"}, indent=2)
+            
+            return json.dumps({
+                "success": True, 
+                "url": url, 
+                "crawl_type": crawl_type, 
+                "pages_crawled": len(crawl_results), 
+                "chunks_stored": chunk_count, 
+                "message": message
+            }, indent=2)
+            
+        except ValueError as e:
+            return json.dumps({"success": False, "url": url, "error": str(e)}, indent=2)
+            
     except Exception as e:
         return json.dumps({"success": False, "url": url, "error": str(e)}, indent=2)
+
+async def _process_crawl_results(supabase_client, crawl_results: list, crawl_type: str) -> int:
+    """Helper function to process crawl results and return chunk count."""
+    urls, chunk_numbers, contents, metadatas = [], [], [], []
+    chunk_count = 0
+    
+    for doc in crawl_results:
+        source_url = doc['url']
+        md = doc['markdown']
+        chunks = semantic_chunk_markdown(md)
+        for i, chunk in enumerate(chunks):
+            urls.append(source_url)
+            chunk_numbers.append(i)
+            contents.append(chunk)
+            metadatas.append(build_metadata(chunk, i, source_url, crawl_type=crawl_type, version=1))
+            chunk_count += 1
+    
+    url_to_full_document = {doc['url']: doc['markdown'] for doc in crawl_results}
+    batch_upsert_documents(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=20)
+    
+    return chunk_count
 
 @mcp.tool()
 async def get_available_sources(ctx: Context) -> str:
@@ -508,96 +222,7 @@ async def get_available_sources(ctx: Context) -> str:
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, indent=2)
 
-# --- Helper function for checking and updating document changes for a single URL ---
-async def check_and_update_document_changes(ctx: Context, url: str) -> dict:
-    """
-    Check for changes in a document by comparing the latest version with the previous version.
-    If changes are found, store the new version.
-    Returns a dict with the result.
-    """
-    try:
-        crawler = ctx.request_context.lifespan_context.crawler
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
-        result = supabase_client.rpc('get_latest_version', {'p_url': url}).execute()
-        current_version = result.data if result.data is not None else 0
-        run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
-        result = await crawler.arun(url=url, config=run_config)
-        if not result.success or not result.markdown:
-            return {"success": False, "url": url, "error": "Failed to crawl document"}
-        chunks = semantic_chunk_markdown(result.markdown)
-        if current_version == 0:
-            urls, chunk_numbers, contents, metadatas = [], [], [], []
-            for i, chunk in enumerate(chunks):
-                urls.append(url)
-                chunk_numbers.append(i)
-                contents.append(chunk)
-                metadatas.append(build_metadata(chunk, i, url, version=1))
-            url_to_full_document = {url: result.markdown}
-            batch_upsert_documents(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
-            return {"success": True, "url": url, "message": "First version of document stored", "version": 1}
-        current_content = supabase_client.table("crawled_pages")\
-            .select("content")\
-            .eq("url", url)\
-            .eq("version", current_version)\
-            .order("chunk_number")\
-            .execute()
-        if not current_content.data:
-            return {"success": False, "url": url, "error": "Could not find current version content in database"}
-        current_text = "\n".join(chunk["content"] for chunk in current_content.data if chunk.get("content"))
-        if current_text == result.markdown:
-            return {"success": True, "url": url, "message": "No changes detected", "current_version": current_version, "changes_found": 0}
-        new_version = current_version + 1
-        urls, chunk_numbers, contents, metadatas = [], [], [], []
-        for i, chunk in enumerate(chunks):
-            urls.append(url)
-            chunk_numbers.append(i)
-            contents.append(chunk)
-            metadatas.append(build_metadata(chunk, i, url, version=new_version))
-        url_to_full_document = {url: result.markdown}
-        batch_upsert_documents(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
-        try:
-            comparison = supabase_client.rpc(
-                'compare_document_versions',
-                {'url': url, 'old_version': current_version, 'new_version': new_version}
-            ).execute()
-            changes = []
-            if comparison and comparison.data:
-                for change in comparison.data:
-                    if not change:
-                        continue
-                    change_type = change.get("change_type", "unknown")
-                    change_summary = change.get("change_summary", "No summary available")
-                    change_impact = change.get("change_impact", "low")
-                    change_details = change.get("change_details", {}) or {}
-                    change_obj = {
-                        "change_type": change_type,
-                        "change_summary": change_summary,
-                        "change_impact": change_impact,
-                        "change_details": change_details
-                    }
-                    impact_analysis = analyze_change_impact(change_obj)
-                    changes.append({
-                        "type": change_type,
-                        "summary": change_summary,
-                        "impact": change_impact,
-                        "details": change_details,
-                        "analysis": impact_analysis
-                    })
-                if changes:
-                    change_record = {
-                        "url": url,
-                        "version": new_version,
-                        "change_type": "multiple" if len(changes) > 1 else changes[0]["type"],
-                        "change_summary": f"Found {len(changes)} changes in version {new_version}",
-                        "change_impact": max(c["impact"] for c in changes),
-                        "change_details": {"changes": changes}
-                    }
-                    supabase_client.table("document_changes").upsert(change_record, on_conflict="url,version").execute()
-            return {"success": True, "url": url, "old_version": current_version, "new_version": new_version, "changes_found": len(changes), "changes": changes}
-        except Exception as e:
-            return {"success": False, "url": url, "error": f"Error comparing versions: {str(e)}"}
-    except Exception as e:
-        return {"success": False, "url": url, "error": str(e)}
+
 
 @mcp.tool()
 async def check_all_document_changes(ctx: Context) -> str:
@@ -607,15 +232,22 @@ async def check_all_document_changes(ctx: Context) -> str:
     Returns a summary of all results.
     """
     try:
+        crawler = ctx.request_context.lifespan_context.crawler
         supabase_client = ctx.request_context.lifespan_context.supabase_client
+        
+        # Get all unique URLs
         result = supabase_client.table("crawled_pages").select("url").execute()
         if not result.data:
             return json.dumps({"success": False, "error": "No URLs found in the database"}, indent=2)
+        
         unique_urls = sorted(set(item["url"] for item in result.data if item.get("url")))
         all_results = []
+        
+        # Check each URL for changes
         for url in unique_urls:
-            res = await check_and_update_document_changes(ctx, url)
+            res = await check_and_update_document_changes(crawler, supabase_client, url)
             all_results.append(res)
+        
         summary = {"success": True, "total_urls_checked": len(unique_urls), "results": all_results}
         return json.dumps(summary, indent=2)
     except Exception as e:
