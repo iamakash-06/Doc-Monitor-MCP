@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 import concurrent.futures
 from supabase import create_client, Client
 
+from embeddings import batch_create_embeddings, contextualize_chunk_worker
 
 def get_supabase_client() -> Client:
     """
@@ -32,7 +33,6 @@ def batch_upsert_documents(
     Add or update documents in the Supabase crawled_pages table in batches.
     Deletes existing records with the same URLs before inserting to prevent duplicates.
     """
-    from .embeddings import batch_create_embeddings, contextualize_chunk_worker
     
     unique_urls = list(set(urls))
     

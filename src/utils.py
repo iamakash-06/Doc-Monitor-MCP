@@ -4,13 +4,13 @@ This module imports and exposes all utility functions from the modular component
 """
 
 # Database operations
-from .database import (
+from database import (
     get_supabase_client,
     batch_upsert_documents
 )
 
 # AI embeddings and contextual processing
-from .embeddings import (
+from embeddings import (
     batch_create_embeddings,
     create_single_embedding,
     contextualize_chunk,
@@ -18,13 +18,13 @@ from .embeddings import (
 )
 
 # Search and RAG functionality
-from .search import (
+from search import (
     semantic_search_documents,
     improved_semantic_search
 )
 
 # Web crawling operations
-from .crawling import (
+from crawling import (
     crawl_markdown_file,
     build_dispatcher,
     crawl_batch,
@@ -32,7 +32,7 @@ from .crawling import (
 )
 
 # Document processing and text operations
-from .processing import (
+from processing import (
     smart_chunk_markdown,
     semantic_chunk_markdown,
     extract_section_info,
@@ -41,7 +41,7 @@ from .processing import (
 )
 
 # URL utilities
-from .url_utils import (
+from url_utils import (
     is_openapi_url,
     is_sitemap,
     is_txt,
@@ -52,14 +52,14 @@ from .url_utils import (
 )
 
 # OpenAPI specification handling
-from .openapi import (
+from openapi import (
     fetch_openapi_spec,
     openapi_spec_to_markdown_chunks,
     extract_openapi_info
 )
 
 # High-level document workflows
-from .document_workflows import (
+from document_workflows import (
     process_openapi_documentation,
     process_sitemap_documentation,
     process_text_file_documentation,

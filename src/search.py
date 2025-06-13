@@ -5,7 +5,7 @@ Handles semantic search, vector search, and query processing.
 import re
 from typing import List, Dict, Any, Optional
 from supabase import Client
-from .embeddings import create_single_embedding
+from embeddings import create_single_embedding
 
 
 def semantic_search_documents(

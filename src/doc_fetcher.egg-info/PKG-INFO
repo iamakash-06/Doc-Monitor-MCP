@@ -1,3 +1,18 @@
+Metadata-Version: 2.4
+Name: doc-fetcher
+Version: 0.1.0
+Summary: MCP server for integrating web crawling and RAG into AI agents and AI coding assistants (DocFetcher)
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: crawl4ai==0.6.2
+Requires-Dist: mcp==1.7.1
+Requires-Dist: supabase==2.15.1
+Requires-Dist: openai==1.71.0
+Requires-Dist: dotenv==0.9.9
+Requires-Dist: html2text==2025.4.15
+Dynamic: license-file
+
 <h1 align="center">Doc Monitor MCP</h1>
 
 **Advanced Documentation Monitoring & RAG Server for AI Agents**

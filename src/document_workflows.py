@@ -7,11 +7,11 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple
 from crawl4ai import CrawlerRunConfig, CacheMode
 
-from .openapi import fetch_openapi_spec, openapi_spec_to_markdown_chunks
-from .url_utils import parse_sitemap
-from .crawling import crawl_markdown_file, crawl_batch, crawl_website_recursively
-from .processing import semantic_chunk_markdown, build_metadata, analyze_change_impact
-from .database import batch_upsert_documents
+from openapi import fetch_openapi_spec, openapi_spec_to_markdown_chunks
+from url_utils import parse_sitemap
+from crawling import crawl_markdown_file, crawl_batch, crawl_website_recursively
+from processing import semantic_chunk_markdown, build_metadata, analyze_change_impact
+from database import batch_upsert_documents
 
 
 async def process_openapi_documentation(supabase_client, url: str, chunk_size: int = 5000) -> Tuple[List[Dict[str, Any]], int]:

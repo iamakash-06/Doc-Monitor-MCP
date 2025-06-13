@@ -12,3 +12,13 @@ dependencies = [
     "dotenv==0.9.9",
     "html2text==2025.4.15"
 ]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.9.0",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=1.0.0",
+    "pytest-cov>=6.2.1",
+    "pytest-mock>=3.14.0",
+    "pytest-xdist>=3.7.0",
+]
