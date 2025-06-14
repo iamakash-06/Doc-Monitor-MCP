@@ -11,6 +11,8 @@ Requires-Dist: supabase==2.15.1
 Requires-Dist: openai==1.71.0
 Requires-Dist: dotenv==0.9.9
 Requires-Dist: html2text==2025.4.15
+Requires-Dist: llama-index==0.10.63
+Requires-Dist: llama-index-embeddings-openai==0.1.10
 Dynamic: license-file
 
 <h1 align="center">Doc Monitor MCP</h1>

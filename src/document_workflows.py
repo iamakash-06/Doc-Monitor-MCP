@@ -12,6 +12,7 @@ from url_utils import parse_sitemap
 from crawling import crawl_markdown_file, crawl_batch, crawl_website_recursively
 from processing import semantic_chunk_markdown, build_metadata, analyze_change_impact
 from database import batch_upsert_documents
+from ingestion import DocumentRouter, AdaptiveChunker
 
 
 async def process_openapi_documentation(supabase_client, url: str, chunk_size: int = 5000) -> Tuple[List[Dict[str, Any]], int]:
@@ -54,7 +55,7 @@ async def process_openapi_documentation(supabase_client, url: str, chunk_size: i
 
 async def process_sitemap_documentation(crawler, url: str, max_concurrent: int = 10) -> List[Dict[str, Any]]:
     """
-    Process sitemap and return crawl results.
+    Process sitemap and return crawl results with semantic chunks.
     
     Args:
         crawler: AsyncWebCrawler instance
@@ -62,27 +63,135 @@ async def process_sitemap_documentation(crawler, url: str, max_concurrent: int =
         max_concurrent: Maximum concurrent connections
         
     Returns:
-        List of crawl results
+        List of crawl results with semantically chunked markdown.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"🗺️ Processing sitemap: {url} (max_concurrent={max_concurrent})")
+    
     sitemap_urls = parse_sitemap(url)
     if not sitemap_urls:
+        logger.error(f"❌ No URLs found in sitemap: {url}")
         raise ValueError("No URLs found in sitemap")
     
-    return await crawl_batch(crawler, sitemap_urls, max_concurrent=max_concurrent)
+    logger.info(f"✅ Found {len(sitemap_urls)} URLs in sitemap")
+    
+    # Crawl all URLs from sitemap
+    logger.info(f"🕷️ Crawling {len(sitemap_urls)} URLs from sitemap...")
+    crawl_results = await crawl_batch(crawler, sitemap_urls, max_concurrent=max_concurrent)
+    
+    if not crawl_results:
+        logger.error(f"❌ No content retrieved from sitemap URLs")
+        return []
+    
+    logger.info(f"✅ Sitemap crawling completed: {len(crawl_results)} pages retrieved")
+    
+    # Initialize our chunking system
+    chunker = AdaptiveChunker()
+    router = DocumentRouter()
+    logger.info("✅ Initialized AdaptiveChunker and DocumentRouter")
+    
+    processed_results = []
+    
+    for idx, result in enumerate(crawl_results):
+        raw_text = result.get("markdown", "")
+        if not raw_text:
+            logger.warning(f"⚠️ Sitemap page {idx+1}: No markdown content found")
+            continue
+        
+        page_url = result.get("url", "")
+        logger.info(f"📄 Sitemap page {idx+1}/{len(crawl_results)}: Processing {len(raw_text)} characters from {page_url}")
+        
+        # Detect document type for this specific page
+        doc_type = router.detect_document_type(page_url)
+        
+        # Use adaptive chunking
+        logger.info(f"🧩 Chunking sitemap page {idx+1} with AdaptiveChunker...")
+        chunks = chunker.semantic_chunk(raw_text)
+        logger.info(f"✅ Created {len(chunks)} semantic chunks for sitemap page {idx+1}")
+        
+        # Return in the format expected by _process_crawl_results
+        processed_results.append({
+            "url": page_url,
+            "markdown": raw_text,  # Keep original for compatibility
+            "markdown_chunks": chunks,  # Our new chunked content
+            "original_markdown": raw_text,  # Explicit original content
+            "document_type": doc_type.value,
+            "original_word_count": len(raw_text.split()),
+            "chunk_count": len(chunks)
+        })
+        
+        logger.info(f"📋 Sitemap page {idx+1} summary: {len(chunks)} chunks, {len(raw_text.split())} words")
+    
+    logger.info(f"✅ Processed {len(processed_results)} sitemap pages successfully")
+    return processed_results
 
 
 async def process_text_file_documentation(crawler, url: str) -> List[Dict[str, Any]]:
     """
-    Process text file and return crawl results.
+    Process text file and return crawl results with semantic chunks.
     
     Args:
         crawler: AsyncWebCrawler instance
         url: URL of the text file
         
     Returns:
-        List of crawl results
+        List of crawl results with semantically chunked markdown.
     """
-    return await crawl_markdown_file(crawler, url)
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"🔄 Processing text file: {url}")
+    
+    # 1. Instantiate our new ingestion components
+    router = DocumentRouter()
+    chunker = AdaptiveChunker()
+    logger.info("✅ Initialized DocumentRouter and AdaptiveChunker")
+
+    # 2. Crawl the file to get the raw content
+    logger.info(f"🕷️ Crawling text file: {url}")
+    crawl_results = await crawl_markdown_file(crawler, url)
+    if not crawl_results:
+        logger.error(f"❌ No content retrieved from {url}")
+        return []
+
+    logger.info(f"✅ Retrieved {len(crawl_results)} documents from crawling")
+
+    # 3. Process each crawled document
+    processed_results = []
+    for idx, result in enumerate(crawl_results):
+        raw_text = result.get("markdown", "")
+        if not raw_text:
+            logger.warning(f"⚠️ Document {idx+1}: No markdown content found")
+            continue
+            
+        logger.info(f"📄 Document {idx+1}: Processing {len(raw_text)} characters")
+            
+        # 4. Use the router to detect the document type
+        doc_type = router.detect_document_type(url)
+        logger.info(f"🔍 Detected document type: {doc_type}")
+
+        # 5. Use the chunker to split the content into semantic chunks
+        logger.info(f"🧩 Chunking document {idx+1} with AdaptiveChunker...")
+        chunks = chunker.semantic_chunk(raw_text)
+        logger.info(f"✅ Created {len(chunks)} semantic chunks for document {idx+1}")
+        
+        # Return in the format expected by _process_crawl_results
+        processed_results.append({
+            "url": result["url"],
+            "markdown": raw_text,  # Keep original for compatibility
+            "markdown_chunks": chunks,  # Our new chunked content
+            "original_markdown": raw_text,  # Explicit original content
+            "document_type": doc_type.value,
+            "original_word_count": len(raw_text.split()),
+            "chunk_count": len(chunks)
+        })
+        
+        logger.info(f"📋 Document {idx+1} summary: {len(chunks)} chunks, {len(raw_text.split())} words")
+
+    logger.info(f"✅ Processed {len(processed_results)} documents successfully")
+    return processed_results
 
 
 async def process_website_documentation(
@@ -93,7 +202,7 @@ async def process_website_documentation(
     delay: float = 0.5
 ) -> List[Dict[str, Any]]:
     """
-    Process website recursively and return crawl results.
+    Process website recursively and return crawl results with semantic chunks.
     
     Args:
         crawler: AsyncWebCrawler instance
@@ -103,11 +212,63 @@ async def process_website_documentation(
         delay: Delay between requests
         
     Returns:
-        List of crawl results
+        List of crawl results with semantically chunked markdown.
     """
-    return await crawl_website_recursively(
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"🌐 Processing website: {url} (max_depth={max_depth}, max_pages={max_pages})")
+    
+    crawl_results = await crawl_website_recursively(
         crawler, url, max_depth=max_depth, max_pages=max_pages, delay=delay
     )
+    
+    if not crawl_results:
+        logger.error(f"❌ No content retrieved from website crawling: {url}")
+        return []
+    
+    logger.info(f"✅ Website crawling completed: {len(crawl_results)} pages retrieved")
+    
+    chunker = AdaptiveChunker()
+    router = DocumentRouter()
+    logger.info("✅ Initialized AdaptiveChunker and DocumentRouter")
+    
+    processed_results = []
+
+    for idx, result in enumerate(crawl_results):
+        raw_text = result.get("markdown", "")
+        if not raw_text:
+            logger.warning(f"⚠️ Page {idx+1}: No markdown content found")
+            continue
+        
+        page_url = result.get("url", url)
+        logger.info(f"📄 Page {idx+1}/{len(crawl_results)}: Processing {len(raw_text)} characters from {page_url}")
+        
+        # Detect document type for this specific page
+        doc_type = router.detect_document_type(page_url)
+        
+        # Use adaptive chunking
+        logger.info(f"🧩 Chunking page {idx+1} with AdaptiveChunker...")
+        chunks = chunker.semantic_chunk(raw_text)
+        logger.info(f"✅ Created {len(chunks)} semantic chunks for page {idx+1}")
+        
+        # Return in the format expected by _process_crawl_results
+        processed_results.append({
+            "url": page_url,
+            "markdown": raw_text,  # Keep original for compatibility
+            "markdown_chunks": chunks,  # Our new chunked content
+            "original_markdown": raw_text,  # Explicit original content
+            "title": result.get("title", ""),
+            "depth": result.get("depth", 0),
+            "document_type": doc_type.value,
+            "original_word_count": len(raw_text.split()),
+            "chunk_count": len(chunks)
+        })
+        
+        logger.info(f"📋 Page {idx+1} summary: {len(chunks)} chunks, {len(raw_text.split())} words, depth={result.get('depth', 0)}")
+        
+    logger.info(f"✅ Processed {len(processed_results)} pages successfully")
+    return processed_results
 
 
 async def check_and_update_document_changes(crawler, supabase_client, url: str) -> Dict[str, Any]:
@@ -135,7 +296,8 @@ async def check_and_update_document_changes(crawler, supabase_client, url: str) 
         if not result.success or not result.markdown:
             return {"success": False, "url": url, "error": "Failed to crawl document"}
         
-        chunks = semantic_chunk_markdown(result.markdown)
+        chunker = AdaptiveChunker()
+        chunks = chunker.semantic_chunk(result.markdown)
         
         # If this is the first version, store it
         if current_version == 0:

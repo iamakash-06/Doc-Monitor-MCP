@@ -4,6 +4,7 @@ database
 doc_fetcher_mcp
 document_workflows
 embeddings
+ingestion
 openapi
 processing
 search

@@ -7,6 +7,7 @@ src/database.py
 src/doc_fetcher_mcp.py
 src/document_workflows.py
 src/embeddings.py
+src/ingestion.py
 src/openapi.py
 src/processing.py
 src/search.py

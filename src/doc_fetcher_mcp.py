@@ -15,6 +15,7 @@ from pathlib import Path
 import asyncio
 import json
 import os
+import logging
 from datetime import datetime
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig
@@ -27,6 +28,13 @@ from utils import (
     process_openapi_documentation, process_sitemap_documentation, 
     process_text_file_documentation, process_website_documentation
 )
+
+# Import our new ingestion components
+from ingestion import DocumentRouter, AdaptiveChunker
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # =========================
 # Constants & Config
@@ -102,25 +110,41 @@ async def monitor_documentation(ctx: Context, url: str, notes: str = None) -> st
     """
     Add a documentation URL for monitoring, crawl and index it, and store in monitored_documentations, crawled_pages, and document_changes.
     """
+    logger.info(f"🚀 Starting documentation monitoring for: {url}")
+    
     try:
         supabase_client = ctx.request_context.lifespan_context.supabase_client
         crawler = ctx.request_context.lifespan_context.crawler
         
+        logger.info("✅ Retrieved crawler and supabase client from context")
+        
         # Check if already monitored
+        logger.info(f"🔍 Checking if {url} is already monitored...")
         existing = supabase_client.table("monitored_documentations").select("id, status").eq("url", url).execute()
         if existing.data and any(doc.get("status") == "active" for doc in existing.data):
+            logger.warning(f"⚠️ Documentation already monitored: {url}")
             return json.dumps({"success": False, "url": url, "error": "Documentation already monitored"}, indent=2)
         
-        # Determine crawl type
-        crawl_type = "webpage"
-        if is_openapi_url(url):
-            crawl_type = "openapi"
-        elif is_txt(url):
-            crawl_type = "text_file"
-        elif is_sitemap(url):
-            crawl_type = "sitemap"
+        # Determine crawl type using our new DocumentRouter
+        logger.info(f"🔍 Detecting document type for: {url}")
+        router = DocumentRouter()
+        doc_type = router.detect_document_type(url)
+        
+        # Map document type to crawl type for legacy compatibility
+        crawl_type_mapping = {
+            "openapi": "openapi",
+            "swagger": "openapi", 
+            "llms_txt": "text_file",
+            "markdown": "text_file",
+            "text": "text_file",
+            "sitemap": "sitemap",
+            "webpage": "webpage"
+        }
+        crawl_type = crawl_type_mapping.get(doc_type.value, "webpage")
+        logger.info(f"✅ Detected document type: {doc_type.value} -> crawl_type: {crawl_type}")
         
         # Insert monitoring record
+        logger.info(f"💾 Inserting monitoring record for {url}")
         insert_data = {
             "url": url,
             "crawl_type": crawl_type,
@@ -129,29 +153,39 @@ async def monitor_documentation(ctx: Context, url: str, notes: str = None) -> st
             "date_added": datetime.utcnow().isoformat()
         }
         supabase_client.table("monitored_documentations").upsert(insert_data, on_conflict="url").execute()
+        logger.info("✅ Monitoring record inserted successfully")
         
         # Process documentation based on type
+        logger.info(f"🔄 Processing documentation with type: {crawl_type}")
         try:
             if crawl_type == "openapi":
+                logger.info("🔧 Processing OpenAPI documentation...")
                 crawl_results, chunk_count = await process_openapi_documentation(supabase_client, url, CHUNK_SIZE)
                 message = "OpenAPI spec processed and stored"
             elif crawl_type == "text_file":
+                logger.info("📄 Processing text file documentation...")
                 crawl_results = await process_text_file_documentation(crawler, url)
                 chunk_count = await _process_crawl_results(supabase_client, crawl_results, crawl_type)
                 message = "Text file processed and stored"
             elif crawl_type == "sitemap":
+                logger.info("🗺️ Processing sitemap documentation...")
                 crawl_results = await process_sitemap_documentation(crawler, url, MAX_CONCURRENT)
                 chunk_count = await _process_crawl_results(supabase_client, crawl_results, crawl_type)
                 message = "Sitemap processed and stored"
             else:
+                logger.info("🌐 Processing website documentation...")
                 crawl_results = await process_website_documentation(crawler, url, MAX_DEPTH, 100, 0.5)
                 chunk_count = await _process_crawl_results(supabase_client, crawl_results, crawl_type)
                 message = "Website processed and stored"
             
             if not crawl_results:
+                logger.error(f"❌ No content found for {url}")
                 return json.dumps({"success": False, "url": url, "error": "No content found"}, indent=2)
             
+            logger.info(f"✅ Processing completed: {len(crawl_results)} pages, {chunk_count} chunks")
+            
             # Record initial change
+            logger.info("📝 Recording initial change record...")
             change_record = {
                 "url": url,
                 "version": 1,
@@ -163,40 +197,99 @@ async def monitor_documentation(ctx: Context, url: str, notes: str = None) -> st
             }
             supabase_client.table("document_changes").upsert(change_record, on_conflict="url,version").execute()
             supabase_client.table("monitored_documentations").update({"last_crawled_at": datetime.utcnow().isoformat()}).eq("url", url).execute()
+            logger.info("✅ Change record and monitoring update completed")
             
-            return json.dumps({
+            result = {
                 "success": True, 
                 "url": url, 
                 "crawl_type": crawl_type, 
+                "document_type": doc_type.value,
                 "pages_crawled": len(crawl_results), 
                 "chunks_stored": chunk_count, 
                 "message": message
-            }, indent=2)
+            }
+            logger.info(f"🎉 Documentation monitoring completed successfully: {result}")
+            return json.dumps(result, indent=2)
             
         except ValueError as e:
+            logger.error(f"❌ ValueError during processing: {str(e)}")
             return json.dumps({"success": False, "url": url, "error": str(e)}, indent=2)
             
     except Exception as e:
+        logger.error(f"❌ Unexpected error in monitor_documentation: {str(e)}")
         return json.dumps({"success": False, "url": url, "error": str(e)}, indent=2)
 
 async def _process_crawl_results(supabase_client, crawl_results: list, crawl_type: str) -> int:
     """Helper function to process crawl results and return chunk count."""
+    logger.info(f"🚀 Processing {len(crawl_results)} crawl results with crawl_type: {crawl_type}")
+    
+    # Initialize our new adaptive chunker
+    chunker = AdaptiveChunker()
+    logger.info("✅ AdaptiveChunker initialized")
+    
     urls, chunk_numbers, contents, metadatas = [], [], [], []
     chunk_count = 0
     
-    for doc in crawl_results:
+    for doc_idx, doc in enumerate(crawl_results):
         source_url = doc['url']
-        md = doc['markdown']
-        chunks = semantic_chunk_markdown(md)
+        
+        # Handle different data formats from our new workflow functions
+        if 'markdown_chunks' in doc:
+            # New format from our updated workflow functions
+            chunks = doc['markdown_chunks']
+            original_markdown = doc.get('original_markdown', '')
+            logger.info(f"📄 Doc {doc_idx+1}: Using pre-chunked content - {len(chunks)} chunks")
+        else:
+            # Legacy format - need to chunk it
+            md = doc.get('markdown', '')
+            if not md:
+                logger.warning(f"⚠️ Doc {doc_idx+1}: No markdown content found, skipping")
+                continue
+                
+            logger.info(f"📄 Doc {doc_idx+1}: Chunking {len(md)} characters with AdaptiveChunker")
+            chunks = chunker.semantic_chunk(md)
+            original_markdown = md
+            logger.info(f"✅ Doc {doc_idx+1}: Created {len(chunks)} semantic chunks")
+        
+        # Process each chunk
         for i, chunk in enumerate(chunks):
+            if not chunk or len(chunk.strip()) < 50:  # Skip very small chunks
+                logger.warning(f"⚠️ Skipping very small chunk {i} ({len(chunk)} chars)")
+                continue
+                
             urls.append(source_url)
             chunk_numbers.append(i)
             contents.append(chunk)
-            metadatas.append(build_metadata(chunk, i, source_url, crawl_type=crawl_type, version=1))
+            metadata = build_metadata(chunk, i, source_url, crawl_type=crawl_type, version=1)
+            metadatas.append(metadata)
             chunk_count += 1
+            
+            if i == 0:  # Log first chunk details
+                logger.info(f"📝 First chunk preview: {chunk[:100]}...")
     
-    url_to_full_document = {doc['url']: doc['markdown'] for doc in crawl_results}
-    batch_upsert_documents(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=20)
+    logger.info(f"📊 Total chunks to store: {chunk_count}")
+    
+    if chunk_count == 0:
+        logger.error("❌ No valid chunks to store!")
+        return 0
+    
+    # Prepare url_to_full_document mapping
+    url_to_full_document = {}
+    for doc in crawl_results:
+        url = doc['url']
+        if 'original_markdown' in doc:
+            url_to_full_document[url] = doc['original_markdown']
+        else:
+            url_to_full_document[url] = doc.get('markdown', '')
+    
+    logger.info(f"💾 Storing {chunk_count} chunks in database...")
+    
+    try:
+        batch_upsert_documents(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=20)
+        logger.info(f"✅ Successfully stored {chunk_count} chunks in database")
+    except Exception as e:
+        logger.error(f"❌ Failed to store chunks in database: {str(e)}")
+        raise
     
     return chunk_count
 

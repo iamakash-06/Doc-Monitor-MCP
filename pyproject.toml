@@ -10,7 +10,9 @@ dependencies = [
     "supabase==2.15.1",
     "openai==1.71.0",
     "dotenv==0.9.9",
-    "html2text==2025.4.15"
+    "html2text==2025.4.15",
+    "llama-index==0.10.63",
+    "llama-index-embeddings-openai==0.1.10"
 ]
 
 [dependency-groups]

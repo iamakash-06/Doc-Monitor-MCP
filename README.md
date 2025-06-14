@@ -52,97 +52,54 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 uv pip install -e .
 ```
 
-## 🚀 Quick Start (Automated Setup)
+## ⚙️ Configuration
 
-**The easiest way to get started:**
+Create a `.env` file in the project root:
 
-```bash
-git clone https://github.com/iamakash-06/doc-monitor.git
-cd doc-monitor
-make setup
-```
-
-The setup wizard will guide you through:
-- ✅ **Environment configuration** with your API keys
-- ✅ **Dependency installation** and setup
-- ✅ **Database schema creation** automatically
-- ✅ **Configuration validation** and health checks
-
-**That's it!** Your Doc-Monitor-MCP is ready to use.
-
----
-
-## ⚙️ Manual Configuration (Advanced)
-
-If you prefer manual setup or need custom configuration:
-
-### Environment Setup
-
-Copy the template and configure:
-```bash
-cp env.template .env
-# Edit .env with your actual values
-```
-
-Required variables:
 ```env
-# OpenAI API (get from: https://platform.openai.com/api-keys)
+# Server Configuration
+HOST=0.0.0.0
+PORT=8051
+TRANSPORT=sse
+
+# OpenAI API
 OPENAI_API_KEY=your_openai_api_key
 
-# Supabase Database (get from: Supabase Dashboard → Settings → API)
+# Supabase Database
 SUPABASE_URL=your_supabase_project_url
 SUPABASE_SERVICE_KEY=your_supabase_service_key
+
+# Optional: Contextual Embeddings (requires additional OpenAI model access)
+MODEL_CHOICE=gpt-4o-mini
 ```
 
-### Database Setup
+## 🗄️ Database Setup
 
-**Automated (Recommended):**
-```bash
-make db-setup
-```
-
-**Manual:**
 1. Create a new Supabase project at [supabase.com](https://supabase.com)
 2. Navigate to the SQL Editor in your dashboard
-3. Execute the complete SQL schema from `crawled_pages.sql`
+3. Execute the complete SQL schema from `crawled_pages.sql`:
+
+```bash
+# Copy the entire contents of crawled_pages.sql and run in Supabase SQL Editor
+```
+
+This creates the required tables, indexes, functions, and RLS policies.
 
 ## ▶️ Running the Server
 
-### Quick Start
+### Docker
 
-```bash
-make dev           # Start development server
-make validate      # Check configuration
-make health-check  # System diagnostics
-```
-
-### Manual Commands
-
-**Local Development:**
-```bash
-uv run src/doc_fetcher_mcp.py
-```
-
-**Docker:**
 ```bash
 docker run --env-file .env -p 8051:8051 doc-monitor
 ```
 
-**With Debug Logging:**
+### Local
+
 ```bash
-make dev-debug
+uv run src/doc_fetcher_mcp.py
 ```
 
 The server will start and be available at `http://localhost:8051` (SSE) or via stdio transport.
-
-### Troubleshooting
-
-If you encounter issues:
-```bash
-make validate           # Check configuration
-make health-check-full  # Comprehensive diagnostics
-make help              # Show all available commands
-```
 
 ## 🛠️ MCP Tools API Reference
 
